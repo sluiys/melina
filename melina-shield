@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+
+# Resolve ESP mount point via bootctl
+BOOT_DIR=$(bootctl -p 2>/dev/null)
+if [[ -z "$BOOT_DIR" ]]; then
+    BOOT_DIR="/boot"
+fi
+
+if [[ ! -d "$BOOT_DIR" ]]; then
+    echo "CRITICAL ERROR: Base directory ($BOOT_DIR) not found. Aborting backup." >&2
+    exit 1
+fi
+
+# State variables
+BOOT_TYPE="UNKNOWN"
+TARGET_FILES=()
+SAFE_FILES=()
+
+ENTRIES_DIR="${BOOT_DIR}/loader/entries"
+UKI_DIR="${BOOT_DIR}/EFI/Linux"
+MELINA_UKI_DIR="${BOOT_DIR}/EFI/Melina"
+
+# Evaluate Standard Architecture
+if [[ -d "$ENTRIES_DIR" ]] && grep -qE "^linux[[:space:]]+" "$ENTRIES_DIR"/*.conf 2>/dev/null; then
+    BOOT_TYPE="STANDARD"
+    TARGET_FILES=("${BOOT_DIR}/vmlinuz-linux" "${BOOT_DIR}/initramfs-linux.img")
+    SAFE_FILES=("${BOOT_DIR}/vmlinuz-linux-safe" "${BOOT_DIR}/initramfs-linux-safe.img")
+
+# Evaluate UKI Architecture
+elif [[ -d "$UKI_DIR" ]] && ls "$UKI_DIR"/*.efi >/dev/null 2>&1; then
+    BOOT_TYPE="UKI"
+    UKI_FILE=$(ls "$UKI_DIR"/*.efi | head -n 1)
+    UKI_FILENAME=$(basename "$UKI_FILE")
+    
+    TARGET_FILES=("$UKI_FILE")
+    SAFE_FILES=("${MELINA_UKI_DIR}/${UKI_FILENAME%.efi}-safe.efi")
+else
+    echo "CRITICAL ERROR: Unrecognized boot architecture. Missing standard entries or UKI binaries." >&2
+    exit 1
+fi
+
+# Validate target integrity and compute total allocation footprint
+TOTAL_SIZE_BYTES=0
+for file in "${TARGET_FILES[@]}"; do
+    if [[ ! -f "$file" ]]; then
+        echo "CRITICAL ERROR: Required structural file missing: $file" >&2
+        exit 1
+    fi
+    SIZE=$(stat -c%s "$file")
+    TOTAL_SIZE_BYTES=$((TOTAL_SIZE_BYTES + SIZE))
+done
+
+# Evaluate ESP storage capacity
+FREE_SPACE_BYTES=$(df -B1 "$BOOT_DIR" | awk 'NR==2 {print $4}')
+
+# Enforce capacity constraints
+if (( TOTAL_SIZE_BYTES > FREE_SPACE_BYTES )); then
+    echo "CRITICAL ERROR: Insufficient ESP capacity. Backup aborted." >&2
+    exit 1
+fi
+
+# Ensure isolated directory exists for UKI
+if [[ "$BOOT_TYPE" == "UKI" ]] && [[ ! -d "$MELINA_UKI_DIR" ]]; then
+    mkdir -p "$MELINA_UKI_DIR"
+fi
+
+# Execute purge of deprecated fallback artifacts
+for safe_file in "${SAFE_FILES[@]}"; do
+    if [[ -f "$safe_file" ]]; then
+        rm -f "$safe_file"
+    fi
+done
+
+# Execute backup duplication preserving file attributes
+for i in "${!TARGET_FILES[@]}"; do
+    cp -p "${TARGET_FILES[$i]}" "${SAFE_FILES[$i]}"
+done
+
+# Configuration generation (Idempotency check)
+CONF_PATH="${ENTRIES_DIR}/melina-fallback.conf"
+DESIRED_CONF=""
+
+if [[ "$BOOT_TYPE" == "UKI" ]]; then
+    EFI_REL_PATH="/EFI/Melina/$(basename "${SAFE_FILES[0]}")"
+    DESIRED_CONF=$(cat <<EOF
+title   Arch Linux {Melina}
+efi     ${EFI_REL_PATH}
+EOF
+)
+
+elif [[ "$BOOT_TYPE" == "STANDARD" ]]; then
+    PRIMARY_CONF=$(grep -l "^linux[[:space:]]\+/vmlinuz-linux" "$ENTRIES_DIR"/*.conf | head -n 1)
+    OPTIONS_LINE=$(grep "^options" "$PRIMARY_CONF")
+    
+    DESIRED_CONF=$(cat <<EOF
+title   Arch Linux {Melina}
+linux   /vmlinuz-linux-safe
+initrd  /initramfs-linux-safe.img
+${OPTIONS_LINE}
+EOF
+)
+fi
+
+# Write configuration only if missing or altered
+if [[ ! -f "$CONF_PATH" ]] || [[ "$(<"$CONF_PATH")" != "$DESIRED_CONF" ]]; then
+    echo "$DESIRED_CONF" > "$CONF_PATH"
+fi
+
+# Single minimal success output for pacman hook interface
+echo "Melina: Fallback shield successfully updated."

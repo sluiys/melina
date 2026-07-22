@@ -1,0 +1,244 @@
+#!/usr/bin/env ruby
+
+require 'fileutils'
+require 'open3'
+
+module Config
+  BASH_ENGINE_PATH = '/usr/local/bin/melina-shield'
+  HOOK_DIR = '/etc/pacman.d/hooks'
+  HOOK_FILE = "#{HOOK_DIR}/00-melina-shield.hook"
+end
+
+class MelinaCLI
+  def initialize
+    @command = ARGV[0]
+    @boot_dir = resolve_boot_dir
+    @arch_type = :unknown
+    @target_files = []
+    @safe_files = []
+  end
+
+  def run
+    if Process.uid != 0
+      abort("CRITICAL ERROR: The 'melina' command requires administrative privileges (root). Run with sudo.")
+    end
+
+    case @command
+    when 'init'
+      pre_flight_check
+      install_infrastructure
+    when 'remove'
+      @boot_dir = resolve_boot_dir
+      remove_infrastructure
+    when 'restore'
+      detect_architecture
+      execute_restore
+    else
+      show_help
+    end
+  end
+
+  private
+
+  def resolve_boot_dir
+    stdout, _, status = Open3.capture3("bootctl -p")
+    status.success? ? stdout.strip : "/boot"
+  end
+
+  def check_arch_linux
+    unless File.exist?('/etc/os-release') && File.read('/etc/os-release').match?(/ID(_LIKE)?=arch/)
+      abort("CRITICAL ERROR: Unsupported operating system. Melina requires an Arch Linux-based distribution.")
+    end
+  end
+
+  def detect_architecture
+    entries_dir = File.join(@boot_dir, "loader", "entries")
+    uki_dir = File.join(@boot_dir, "EFI", "Linux")
+    melina_uki_dir = File.join(@boot_dir, "EFI", "Melina")
+
+    has_standard = false
+    if Dir.exist?(entries_dir)
+      Dir.glob(File.join(entries_dir, "*.conf")).each do |conf_file|
+        if File.read(conf_file).match?(/^linux\s+/)
+          has_standard = true
+          break
+        end
+      end
+    end
+
+    has_uki = Dir.exist?(uki_dir) && !Dir.glob(File.join(uki_dir, "*.efi")).empty?
+
+    if has_standard
+      @arch_type = :standard
+      @target_files = [File.join(@boot_dir, "vmlinuz-linux"), File.join(@boot_dir, "initramfs-linux.img")]
+      @safe_files = [File.join(@boot_dir, "vmlinuz-linux-safe"), File.join(@boot_dir, "initramfs-linux-safe.img")]
+    elsif has_uki
+      @arch_type = :uki
+      uki_file = Dir.glob(File.join(uki_dir, "*.efi")).first
+      uki_filename = File.basename(uki_file)
+      @target_files = [uki_file]
+      @safe_files = [File.join(melina_uki_dir, "#{uki_filename.sub('.efi', '')}-safe.efi")]
+    else
+      abort("CRITICAL ERROR: Unable to classify boot architecture. Neither standard nor UKI binaries detected.")
+    end
+  end
+
+  def pre_flight_check
+    puts "-> Executing compatibility checks..."
+    check_arch_linux
+    
+    unless system("bootctl status > /dev/null 2>&1")
+      abort("CRITICAL ERROR: systemd-boot is not detected as the active bootloader.")
+    end
+
+    detect_architecture
+
+    total_size = @target_files.sum do |file|
+      File.exist?(file) ? File.size(file) : abort("CRITICAL ERROR: Required target file missing: #{file}")
+    end
+
+    stdout, _, status = Open3.capture3("df -B1 #{@boot_dir} | awk 'NR==2 {print $4}'")
+    abort("CRITICAL ERROR: Failed to read free space on the ESP partition.") unless status.success?
+    
+    free_space = stdout.strip.to_i
+
+    if total_size > free_space
+      abort("CRITICAL ERROR: Insufficient capacity on ESP (#{@boot_dir}). Required: #{total_size / 1024 / 1024} MB. Available: #{free_space / 1024 / 1024} MB.")
+    end
+
+    puts "-> Checks completed: Architecture #{@arch_type.to_s.upcase}, Space Adequate."
+  end
+
+  def install_hook
+    FileUtils.mkdir_p(Config::HOOK_DIR)
+    hook_content = <<~EOF
+      [Trigger]
+      Operation = Install
+      Operation = Upgrade
+      Operation = Remove
+      Type = Package
+      Target = linux
+      Target = systemd
+      Target = mkinitcpio
+      Target = amd-ucode
+      Target = intel-ucode
+
+      [Action]
+      Description = Melina: Executing kernel fallback shield (Pre-Transaction)...
+      When = PreTransaction
+      Exec = #{Config::BASH_ENGINE_PATH}
+      Depends = bash
+    EOF
+    File.write(Config::HOOK_FILE, hook_content)
+    puts "   [OK] ALPM Hook configured at #{Config::HOOK_FILE}"
+  end
+
+  def install_infrastructure
+      puts "-> Installing Melina Fallback Shield..."
+  
+      if File.exist?('melina-shield')
+        FileUtils.cp('melina-shield', Config::BASH_ENGINE_PATH)
+      else
+        puts "-> 'melina-shield' not found locally. Fetching from GitHub..."
+        repo_url = "https://raw.githubusercontent.com/sluiys/melina/main/melina-shield"
+        unless system("curl -sSL #{repo_url} -o #{Config::BASH_ENGINE_PATH}")
+          abort("CRITICAL ERROR: Failed to download 'melina-shield' from GitHub. Check your internet connection.")
+        end
+      end
+  
+      FileUtils.chmod(0755, Config::BASH_ENGINE_PATH)
+      puts "   [OK] Bash engine installed at #{Config::BASH_ENGINE_PATH}"
+  
+      install_hook
+  
+      puts "-> Triggering shield to generate initial backup and configuration..."
+      system(Config::BASH_ENGINE_PATH)
+  
+      current_script = File.expand_path($PROGRAM_NAME)
+      destination = "/usr/local/bin/melina"
+      
+      if current_script != destination
+        FileUtils.cp(current_script, destination)
+        FileUtils.chmod(0755, destination)
+        puts "   [OK] Global CLI registered at #{destination}"
+      end
+  
+      puts "-> SUCCESS: Melina is installed and active."
+    end
+
+  def remove_infrastructure
+    puts "-> Removing Melina from the system..."
+    
+    FileUtils.rm_f(Config::HOOK_FILE)
+    FileUtils.rm_f(Config::BASH_ENGINE_PATH)
+    FileUtils.rm_f("/usr/local/bin/melina")
+    
+    conf_path = File.join(@boot_dir, "loader", "entries", "melina-fallback.conf")
+    FileUtils.rm_f(conf_path)
+
+    begin
+      detect_architecture
+      @safe_files.each { |f| FileUtils.rm_f(f) if File.exist?(f) }
+    rescue
+      # Ignore missing files if architecture detection fails during removal
+    end
+    
+    melina_uki_dir = File.join(@boot_dir, "EFI", "Melina")
+    FileUtils.rm_rf(melina_uki_dir) if Dir.exist?(melina_uki_dir)
+
+    puts "-> SUCCESS: System cleaned. Infrastructure successfully removed."
+  end
+
+  def execute_restore
+      puts "-> Initiating recovery protocol..."
+      
+      if File.exist?(Config::HOOK_FILE)
+        FileUtils.rm_f(Config::HOOK_FILE)
+        puts "   [OK] Shield temporarily disarmed to prevent overwrite."
+      end
+  
+      puts "-> Reconstructing primary boot binaries..."
+      
+      trigger_packages = ['linux', 'systemd', 'mkinitcpio', 'amd-ucode', 'intel-ucode']
+      packages_to_reinstall = []
+
+      trigger_packages.each do |pkg|
+        if system("pacman -Qq #{pkg} > /dev/null 2>&1")
+          packages_to_reinstall << pkg
+        end
+      end
+  
+      if packages_to_reinstall.empty?
+        abort("CRITICAL ERROR: No base packages detected. Pacman database might be severely corrupted.")
+      end
+  
+      puts "   [INFO] Reinstalling detected core packages: #{packages_to_reinstall.join(' ')}"
+      puts "   Delegating repair to pacman..."
+      
+      system("pacman -S #{packages_to_reinstall.join(' ')}")
+      
+      unless $?.success?
+        abort("CRITICAL ERROR: pacman failed to reinstall the packages. Manual intervention required.")
+      end
+  
+      puts "-> Rebuilding safety infrastructure..."
+      install_hook
+      system(Config::BASH_ENGINE_PATH)
+  
+      puts "-> SUCCESS: System recovered and shield rearmed."
+    end
+
+  def show_help
+    puts <<~HELP
+      Usage: sudo melina [command]
+
+      Available commands:
+        init      Installs and activates the kernel backup automation.
+        remove    Uninstalls the tool and purges all security files.
+        restore   Repairs the system via pacman and resets the shield.
+    HELP
+  end
+end
+
+cli = MelinaCLI.new
+cli.run
