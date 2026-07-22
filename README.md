@@ -58,10 +58,10 @@ If your system crashes during an update and your primary Arch Linux boot option 
     ```
     The CLI will temporarily disarm the safety hook, query the ALPM database for your core packages (e.g., linux, systemd, amd-ucode, mkinitcpio), force a clean pacman reinstallation to fix the broken binaries, and rearm the shield automatically.
 
-Requirements
+## Requirements
 
-    Arch Linux (or Arch-based distributions)
+* Arch Linux (or Arch-based distributions)
 
-    systemd-boot as the active bootloader
+* systemd-boot as the active bootloader
 
-    Sufficient space on the EFI System Partition to duplicate your kernel/UKI files.
+* Sufficient space on the EFI System Partition to duplicate your kernel/UKI files.
