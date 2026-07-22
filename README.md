@@ -1,5 +1,6 @@
-# Melina: Automated Kernel Fallback Shield for Arch Linux
-
+# <div align="center">Melina</div>
+### <div align="center"> Automated Kernel Fallback Shield for Arch Linux
+</div>
 <div align="center">
   <img src="https://raw.githubusercontent.com/sluiys/Melina/refs/heads/main/melina.jpg" width="670" alt="Melina">
 </div>
