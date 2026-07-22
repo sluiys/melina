@@ -1,5 +1,9 @@
 # Melina: Automated Kernel Fallback Shield for Arch Linux
 
+<div align="center">
+  <img src="https://raw.githubusercontent.com/sluiys/Melina/refs/heads/main/melina.jpg" width="670" alt="Melina">
+</div>
+
 Melina is a zero-configuration, automated fallback shield for Arch Linux systems using `systemd-boot`. It intercepts `pacman` kernel and system transactions, creating an isolated, bootable safety net before any destructive writes occur on your disk.
 
 If a system crash, power outage, or fatal error occurs during a kernel update, your primary boot entries will corrupt. Melina ensures you always have a pristine, untouched `Arch Linux {Melina}` entry waiting in your boot menu to instantly recover your machine.
@@ -17,7 +21,7 @@ Melina is designed with infrastructure-as-code principles and operates autonomou
 Run the following bootstrap command to fetch and register the CLI globally on your system.
 
 ```bash
-curl -sSL [https://raw.githubusercontent.com/sluiys/melina/main/install.sh](https://raw.githubusercontent.com/sluiys/melina/main/install.sh) | sudo bash
+curl -sSL https://raw.githubusercontent.com/sluiys/melina/main/install.sh | sudo bash
 ```
 After registering the command, initialize the infrastructure:
 ```bash
