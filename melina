@@ -140,7 +140,7 @@ class MelinaCLI
         FileUtils.cp('melina-shield', Config::BASH_ENGINE_PATH)
       else
         puts "-> 'melina-shield' not found locally. Fetching from GitHub..."
-        repo_url = "https://raw.githubusercontent.com/sluiys/melina/main/melina-shield"
+        repo_url = "https://raw.githubusercontent.com/sluiys/Melina/main/melina-shield"
         unless system("curl -sSL #{repo_url} -o #{Config::BASH_ENGINE_PATH}")
           abort("CRITICAL ERROR: Failed to download 'melina-shield' from GitHub. Check your internet connection.")
         end
